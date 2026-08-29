@@ -1,18 +1,27 @@
 import logging
 import secrets
-import traceback
+import time
+from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import List, Optional
 
 import httpx
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 import models
 from auth import create_access_token, get_current_user, get_password_hash, verify_password
-from config import NOTIFY_SERVICE_URL, PUBLIC_BASE_URL, SHARE_LINK_TTL_HOURS
+from config import (
+    CORS_ALLOW_ORIGINS,
+    NOTIFY_SERVICE_URL,
+    PUBLIC_BASE_URL,
+    SHARE_LINK_TTL_HOURS,
+    SHARE_MAX_ATTEMPTS,
+    SHARE_WINDOW_SECONDS,
+)
 from database import engine, get_db, search_scans_by_query
 
 logging.basicConfig(level=logging.INFO)
@@ -27,30 +36,24 @@ app = FastAPI(
 )
 
 
-@app.middleware("http")
-async def cors_middleware(request: Request, call_next):
-    response = await call_next(request)
-    origin = request.headers.get("origin")
-    if origin:
-        response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Credentials"] = "true"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "*"
-    return response
+# CORS (F11): explicit allowlist only — never reflect arbitrary origins. An empty
+# allowlist permits no cross-origin requests (same-origin only).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ALLOW_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+)
 
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    logger.error("Unhandled exception on %s: %s", request.url, exc)
-    return JSONResponse(
-        status_code=500,
-        content={
-            "error": str(exc),
-            "type": type(exc).__name__,
-            "traceback": traceback.format_exc(),
-            "path": str(request.url),
-        },
-    )
+    # F6: record full detail server-side (path only — never the query string, so
+    # a share link's ?password= is never logged) and return a generic body so
+    # tracebacks and internals are not disclosed to clients.
+    logger.error("Unhandled exception on %s %s", request.method, request.url.path, exc_info=exc)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +157,27 @@ def _fire_notify(event: str, payload: dict) -> None:
         logger.warning("Notification service unreachable: %s", exc)
 
 
+# In-memory brute-force throttle for password-protected share links (F15).
+# Per-process only; production should use a shared store (Redis) or a gateway/WAF.
+_share_attempts: dict = defaultdict(list)
+
+
+def _enforce_share_rate_limit(token: str) -> None:
+    now = time.monotonic()
+    recent = [t for t in _share_attempts[token] if now - t < SHARE_WINDOW_SECONDS]
+    _share_attempts[token] = recent
+    if len(recent) >= SHARE_MAX_ATTEMPTS:
+        raise HTTPException(status_code=429, detail="Too many attempts; try again later")
+
+
+def _record_share_attempt(token: str) -> None:
+    _share_attempts[token].append(time.monotonic())
+
+
+def _clear_share_attempts(token: str) -> None:
+    _share_attempts.pop(token, None)
+
+
 # ---------------------------------------------------------------------------
 # Auth routes
 # ---------------------------------------------------------------------------
@@ -177,14 +201,11 @@ def register(payload: UserRegister, db: Session = Depends(get_db)):
 
 @app.post("/auth/login")
 def login(payload: UserLogin, db: Session = Depends(get_db)):
-    logger.info("Login attempt — username: %s password: %s", payload.username, payload.password)
+    # F10: never log passwords; %r escapes control chars to prevent log injection.
+    logger.info("Login attempt for user %r", payload.username)
     user = db.query(models.User).filter(models.User.username == payload.username).first()
     if not user or not verify_password(payload.password, user.hashed_password):
-        logger.warning(
-            "Failed login — username: '%s' password: '%s'",
-            payload.username,
-            payload.password,
-        )
+        logger.warning("Failed login for user %r", payload.username)
         raise HTTPException(status_code=401, detail="Incorrect username or password")
     token = create_access_token({"sub": user.username})
     return {"access_token": token, "token_type": "bearer"}
@@ -240,7 +261,7 @@ def search_scans(
 ):
     if not q or len(q) < 2:
         raise HTTPException(status_code=400, detail="Search query must be at least 2 characters")
-    results = search_scans_by_query(db, q)
+    results = search_scans_by_query(db, q, current_user.id)
     return {"results": results, "count": len(results)}
 
 
@@ -250,7 +271,11 @@ def get_scan(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    scan = db.query(models.ScanResult).filter(models.ScanResult.id == scan_id).first()
+    # F3: scope by owner so a user cannot read another tenant's scan by ID (BOLA).
+    scan = db.query(models.ScanResult).filter(
+        models.ScanResult.id == scan_id,
+        models.ScanResult.owner_id == current_user.id,
+    ).first()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
     return scan
@@ -353,8 +378,11 @@ def view_shared_scan(
         raise HTTPException(status_code=404, detail="Share link not found or has expired")
 
     if share.password_hash:
+        _enforce_share_rate_limit(share.token)
         if not password or not verify_password(password, share.password_hash):
+            _record_share_attempt(share.token)
             raise HTTPException(status_code=401, detail="Invalid or missing password")
+        _clear_share_attempts(share.token)
 
     scan = db.query(models.ScanResult).filter(
         models.ScanResult.id == share.scan_id

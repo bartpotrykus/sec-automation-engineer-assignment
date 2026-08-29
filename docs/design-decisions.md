@@ -8,7 +8,7 @@ walkthroughs live in [technical-notes.md](technical-notes.md).
 | ---- | ------ |
 | 1 — Shared Report Link | ✅ Implemented |
 | 2 — Security analysis (scans + findings) | ✅ All four scans + findings.md |
-| 3 — Remediation | ⏳ Planned |
+| 3 — Remediation | ✅ 13 findings fixed; deferrals documented |
 | 4 — Containerisation & deployment | ✅ Dockerfile + Terraform |
 | 5 — Executive summary | ⏳ Planned |
 
@@ -203,3 +203,52 @@ fallbacks remain only until Task 3 removes them (F1).
 - Distroless base to shed the unfixable OS CVEs (F19).
 - App reads secrets from the CSI file mount instead of env vars (clears CKV_K8S_35 / F20).
 - Automated base-image digest bumps.
+
+---
+
+## Task 3 — Remediation
+
+### Overview
+Fixed 13 findings in code (≥3 critical/high, one — F15 — in the Task 1 feature). Deferrals are
+documented in [remediation-plan.md](remediation-plan.md). All four CI gates go green as a result.
+
+### Key decisions
+
+**1. `SECRET_KEY`: env-sourced with an ephemeral dev fallback (not hard-fail).**
+- *For:* removes the committed secret (the actual vulnerability) while letting the app boot in dev/test
+  without extra provisioning; logs a warning.
+- *Against:* a per-process ephemeral key invalidates tokens across restarts/workers — a hard-fail
+  ("refuse to start without SECRET_KEY") is stricter. Chosen the pragmatic option and documented the
+  production expectation (always set it); the deployment injects it from Key Vault.
+
+**2. SQL injection: parameterise *and* scope by owner.**
+- Fixing F2 (injection) and F4 (missing owner filter) together — the raw query had both flaws. Kept a
+  bound `text()` query rather than switching to the ORM to avoid a circular import (`database` →
+  `models`), which is a smaller, lower-risk change.
+
+**3. CORS: explicit allowlist via `CORSMiddleware`.**
+- Replaced the origin-reflecting custom middleware. Empty allowlist by default (same-origin only);
+  real origins come from `CORS_ALLOW_ORIGINS`. No more `reflect-origin + allow-credentials`.
+
+**4. Rate-limiting `/share` (F15, the Task 1 fix): in-memory per-token throttle.**
+- *For:* a minimal, dependency-free control that blunts password brute force on a public endpoint.
+- *Against:* per-process only — it does not hold across replicas. Documented; production should use a
+  shared store (Redis) or a gateway/WAF. Deliberately not over-built.
+
+**5. Dependency bumps to the lowest version that clears the gate.**
+- `python-jose` 3.5.0, `cryptography` 50.0.1, `python-multipart` 0.0.32. `cryptography` needed 50.0.1
+  specifically (49.0.0 still carried one HIGH). Verified by re-scanning the manifest and re-running the
+  full test suite (21 passing) against the new libraries.
+
+**6. `alg:"none"` removed despite being non-exploitable here** — defense-in-depth, per the F12 analysis:
+it becomes a full auth bypass under a library swap or an empty-key refactor, and costs nothing to drop.
+
+### Effect
+SAST app/ ERROR findings 5 → 0; SCA `requirements.txt` CRITICAL/HIGH → 0; the two auth criticals (F1
+forge-any-token, F2 dump-hashes) and the BOLA reads (F3/F4) are closed. The notify findings remain
+(out of scope) but no longer share a class with anything in `app/`.
+
+### Potential improvements
+- Hard-fail on missing `SECRET_KEY` in a `prod` profile.
+- Distributed rate-limiting for `/share` and login.
+- Split `requirements-dev.txt` so pytest (F18) never ships in the image.

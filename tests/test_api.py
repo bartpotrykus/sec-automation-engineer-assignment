@@ -7,6 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
+os.environ.setdefault("SHARE_MAX_ATTEMPTS", "3")  # keep the F15 rate-limit test fast
 
 from datetime import datetime, timedelta  # noqa: E402
 
@@ -117,7 +118,6 @@ def test_list_scans():
 
 
 def test_search_scans():
-    # TODO: add assertions for search results
     token = register_and_login()
     client.post("/scans", json={
         "title": "SQL Injection via login",
@@ -126,6 +126,34 @@ def test_search_scans():
     }, headers=auth_headers(token))
     resp = client.get("/scans/search?q=SQL", headers=auth_headers(token))
     assert resp.status_code == 200
+    body = resp.json()
+    assert body["count"] == 1
+    assert body["results"][0]["title"] == "SQL Injection via login"
+
+
+def test_search_scoped_to_owner():
+    # F4: search must not leak another user's scans
+    owner = register_and_login("owner2", "owner2@example.com", "pw")
+    client.post("/scans", json={
+        "title": "secret finding", "severity": "high", "affected_component": "x",
+    }, headers=auth_headers(owner))
+    other = register_and_login("mallory2", "mallory2@example.com", "pw")
+    resp = client.get("/scans/search?q=secret", headers=auth_headers(other))
+    assert resp.status_code == 200
+    assert resp.json()["count"] == 0
+
+
+def test_search_injection_is_neutralised():
+    # F2: an injection payload must not error nor bypass owner scoping to dump rows.
+    # Against the old raw-SQL code this returns the victim's row; the fix returns none.
+    victim = register_and_login("victim", "victim@example.com", "pw")
+    client.post("/scans", json={
+        "title": "victim finding", "severity": "high", "affected_component": "x",
+    }, headers=auth_headers(victim))
+    attacker = register_and_login("attacker", "attacker@example.com", "pw")
+    resp = client.get("/scans/search?q=' OR '1'='1", headers=auth_headers(attacker))
+    assert resp.status_code == 200
+    assert resp.json()["count"] == 0
 
 
 def test_update_scan_status():
@@ -246,3 +274,28 @@ def test_expired_share_returns_404():
     db.close()
 
     assert client.get(f"/share/{share_token}").status_code == 404
+
+
+def test_get_scan_non_owner_blocked():
+    # F3: BOLA — a non-owner must not read a scan by ID
+    owner = register_and_login("owner3", "owner3@example.com", "pw")
+    scan_id = _create_scan(owner)
+    other = register_and_login("mallory3", "mallory3@example.com", "pw")
+    assert client.get(f"/scans/{scan_id}", headers=auth_headers(other)).status_code == 404
+    assert client.get(f"/scans/{scan_id}", headers=auth_headers(owner)).status_code == 200
+
+
+def test_share_password_rate_limited():
+    # F15: password-protected links throttle brute force (SHARE_MAX_ATTEMPTS=3 in tests)
+    token = register_and_login()
+    scan_id = _create_scan(token)
+    share_url = client.post(
+        f"/scans/{scan_id}/share", json={"password": "s3cret"}, headers=auth_headers(token)
+    ).json()["share_url"]
+    t = _token_from_url(share_url)
+
+    for _ in range(3):
+        assert client.get(f"/share/{t}?password=wrong").status_code == 401
+    # further attempts are throttled — even with the correct password
+    assert client.get(f"/share/{t}?password=wrong").status_code == 429
+    assert client.get(f"/share/{t}?password=s3cret").status_code == 429

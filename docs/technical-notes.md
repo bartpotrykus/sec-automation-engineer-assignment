@@ -186,3 +186,40 @@ Checkov result after hardening: **28 passed, 0 failed, 3 skipped** (+1 secrets f
 Added `container-scan` (docker build → `trivy image` → upload → gate on secrets/misconfig only, since
 OS CVEs are unfixable) and `iac-scan` (`checkov -d terraform` → upload → gate on any unjustified
 misconfiguration). Both gates are green today.
+
+---
+
+## Task 3 — Remediation
+
+### Code changes by file
+| File | Findings | Change |
+| ---- | -------- | ------ |
+| [config.py](../app/config.py) | F1, F11, F15, F16 | `SECRET_KEY` env-sourced (ephemeral fallback, no default); deleted `DB_USER`/`DB_PASSWORD`/`ADMIN_API_KEY`; added `CORS_ALLOW_ORIGINS`, `SHARE_MAX_ATTEMPTS`, `SHARE_WINDOW_SECONDS` |
+| [auth.py](../app/auth.py) | F12 | `algorithms=[ALGORITHM]` — dropped `"none"` |
+| [database.py](../app/database.py) | F2, F4 | Parameterised `text()` with bound `:q`; added `owner_id = :owner_id` scoping |
+| [main.py](../app/main.py) | F3, F6, F10, F11, F15 | Owner filter in `get_scan`; generic 500 (log path only); no password logging (`%r`); `CORSMiddleware` allowlist; per-token `/share` rate limiter |
+| [requirements.txt](../requirements.txt) | F7, F8, F13 | `python-jose` 3.5.0, `cryptography` 50.0.1, `python-multipart` 0.0.32 |
+
+### Notable mechanics
+- **`SECRET_KEY`:** `os.environ.get("SECRET_KEY")`; if unset, `secrets.token_urlsafe(64)` + a warning.
+  No committed secret; production injects it (Key Vault via CSI).
+- **F15 rate limiter:** module-level `defaultdict(list)` of `token → [monotonic timestamps]`;
+  `_enforce` prunes to the window and raises **429** at `SHARE_MAX_ATTEMPTS`; failures are recorded, a
+  correct password clears the counter. Per-process only (documented; prod = shared store).
+- **F6 log hygiene:** logs `request.url.path`, never `request.url` — so a share link's `?password=` is
+  never written to logs (closes the F6 ↔ Task 1 interaction).
+
+### Dependency bumps
+`cryptography` needed **50.0.1** specifically — 49.0.0 still carried one HIGH (CVE-2026-69247, fixed in
+50.0.0). Verified two ways: `trivy fs --severity CRITICAL,HIGH --exit-code 1 requirements.txt` → exit 0,
+and the full suite (21 passing) re-run against the installed new libraries.
+
+### Test additions ([tests/test_api.py](../tests/test_api.py))
+`test_search_scoped_to_owner` (F4), `test_search_injection_is_neutralised` (F2 — fails on the old raw
+SQL), `test_get_scan_non_owner_blocked` (F3), `test_share_password_rate_limited` (F15). `SHARE_MAX_ATTEMPTS=3`
+is set at import to keep the last test fast. **21 tests pass.**
+
+### Gate verification (post-fix)
+- SAST: Semgrep app/ `ERROR` findings **5 → 0** (only the out-of-scope notify SSRF remains, ungated).
+- SCA: `requirements.txt` CRITICAL/HIGH **→ 0**.
+- Container + IaC gates already green (Task 4). All four green.

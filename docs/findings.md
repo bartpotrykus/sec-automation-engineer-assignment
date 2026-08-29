@@ -49,6 +49,15 @@ tool (F7 up-contextualised, F12 down-graded after verification).
 **SCA totals (Trivy, unique CVEs):** `requirements.txt` — 1 critical / 11 high / 9 medium / 7 low.
 `notify/package-lock.json` — 15 high / 15 medium / 7 low.
 
+### Remediation status (Task 3)
+- **Fixed:** F1, F2, F3, F4, F6, F7, F8, F10, F11, F12, F13, F15, F16 (app-side) — see the git diff and
+  [remediation-plan.md](remediation-plan.md).
+- **Deferred (documented):** F5, F9, F14, F17 and F16's `SERVICE_KEY` (all notify — out of scope), F18
+  (test-only), F19 (base-image OS), F20 (secrets-as-env). Residual risk + compensating controls in the
+  remediation plan.
+- After the fixes, all four CI gates pass (SAST app/ ERRORs → 0; SCA `requirements.txt` CRITICAL/HIGH →
+  0). The `reports/*.json` remain the point-in-time Task 2 analysis; CI regenerates current reports.
+
 ## Rationale for the top findings
 
 **F1 — Hardcoded JWT signing key (Critical).** `SECRET_KEY` is committed in `config.py`. HS256 is

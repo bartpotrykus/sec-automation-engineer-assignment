@@ -1,10 +1,10 @@
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 sqlalchemy==2.0.36
-python-jose==3.3.0
+python-jose==3.5.0
 passlib[bcrypt]==1.7.4
-python-multipart==0.0.6
-cryptography==38.0.1
+python-multipart==0.0.32
+cryptography==50.0.1
 bcrypt==4.0.1
 httpx==0.25.2
 pytest==7.4.3
