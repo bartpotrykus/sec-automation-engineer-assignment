@@ -10,7 +10,7 @@ walkthroughs live in [technical-notes.md](technical-notes.md).
 | 2 — Security analysis (scans + findings) | ✅ All four scans + findings.md |
 | 3 — Remediation | ✅ 13 findings fixed; deferrals documented |
 | 4 — Containerisation & deployment | ✅ Dockerfile + Terraform |
-| 5 — Executive summary | ⏳ Planned |
+| 5 — Executive summary | ✅ docs/executive-summary.md |
 
 ---
 
