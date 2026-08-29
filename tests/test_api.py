@@ -8,6 +8,9 @@ from sqlalchemy.orm import sessionmaker
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 
+from datetime import datetime, timedelta  # noqa: E402
+
+import models  # noqa: E402,F401
 from database import Base, get_db  # noqa: E402
 from main import app  # noqa: E402
 
@@ -148,3 +151,98 @@ def test_delete_scan():
 
     resp = client.delete(f"/scans/{scan_id}", headers=auth_headers(token))
     assert resp.status_code == 204
+
+
+# ---------------------------------------------------------------------------
+# Task 1 — Shared report links
+# ---------------------------------------------------------------------------
+
+def _create_scan(token, **overrides):
+    body = {
+        "title": "Shareable finding",
+        "description": "internal description",
+        "severity": "high",
+        "affected_component": "svc",
+        "remediation_notes": "apply patch X",
+    }
+    body.update(overrides)
+    return client.post("/scans", json=body, headers=auth_headers(token)).json()["id"]
+
+
+def _token_from_url(share_url):
+    return share_url.rsplit("/", 1)[-1]
+
+
+def test_share_scan_requires_auth():
+    resp = client.post("/scans/1/share", json={})
+    assert resp.status_code in (401, 403)
+
+
+def test_share_scan_creates_link():
+    token = register_and_login()
+    scan_id = _create_scan(token)
+    resp = client.post(f"/scans/{scan_id}/share", json={}, headers=auth_headers(token))
+    assert resp.status_code == 201
+    assert "/share/" in resp.json()["share_url"]
+
+
+def test_share_scan_non_owner_blocked():
+    owner = register_and_login("owner", "owner@example.com", "pw")
+    scan_id = _create_scan(owner)
+    other = register_and_login("mallory", "mallory@example.com", "pw")
+    resp = client.post(f"/scans/{scan_id}/share", json={}, headers=auth_headers(other))
+    assert resp.status_code == 404
+
+
+def test_view_shared_scan_excludes_internal_fields():
+    token = register_and_login()
+    scan_id = _create_scan(token)
+    share_url = client.post(
+        f"/scans/{scan_id}/share", json={}, headers=auth_headers(token)
+    ).json()["share_url"]
+    resp = client.get(f"/share/{_token_from_url(share_url)}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["title"] == "Shareable finding"
+    assert "remediation_notes" not in body
+    assert "owner_id" not in body
+
+
+def test_view_shared_scan_unknown_token():
+    assert client.get("/share/does-not-exist").status_code == 404
+
+
+def test_password_protected_share():
+    token = register_and_login()
+    scan_id = _create_scan(token)
+    share_url = client.post(
+        f"/scans/{scan_id}/share",
+        json={"password": "s3cret"},
+        headers=auth_headers(token),
+    ).json()["share_url"]
+    share_token = _token_from_url(share_url)
+
+    assert client.get(f"/share/{share_token}").status_code == 401
+    assert client.get(f"/share/{share_token}?password=wrong").status_code == 401
+    ok = client.get(f"/share/{share_token}?password=s3cret")
+    assert ok.status_code == 200
+    assert ok.json()["title"] == "Shareable finding"
+
+
+def test_expired_share_returns_404():
+    token = register_and_login()
+    scan_id = _create_scan(token)
+    share_url = client.post(
+        f"/scans/{scan_id}/share", json={}, headers=auth_headers(token)
+    ).json()["share_url"]
+    share_token = _token_from_url(share_url)
+
+    db = TestingSessionLocal()
+    share = db.query(models.SharedReport).filter(
+        models.SharedReport.token == share_token
+    ).first()
+    share.expires_at = datetime.utcnow() - timedelta(hours=1)
+    db.commit()
+    db.close()
+
+    assert client.get(f"/share/{share_token}").status_code == 404

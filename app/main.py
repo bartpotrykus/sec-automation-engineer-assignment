@@ -1,6 +1,7 @@
 import logging
+import secrets
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 import httpx
@@ -11,7 +12,7 @@ from sqlalchemy.orm import Session
 
 import models
 from auth import create_access_token, get_current_user, get_password_hash, verify_password
-from config import NOTIFY_SERVICE_URL
+from config import NOTIFY_SERVICE_URL, PUBLIC_BASE_URL, SHARE_LINK_TTL_HOURS
 from database import engine, get_db, search_scans_by_query
 
 logging.basicConfig(level=logging.INFO)
@@ -107,9 +108,40 @@ class ScanOut(BaseModel):
         from_attributes = True
 
 
+class ShareCreate(BaseModel):
+    password: Optional[str] = None
+
+
+class ShareResponse(BaseModel):
+    share_url: str
+
+
+class SharedScanView(BaseModel):
+    """Curated public projection of a scan — intentionally omits owner_id and
+    internal remediation_notes so external stakeholders see only report data."""
+    title: str
+    description: Optional[str]
+    severity: str
+    status: str
+    cve_id: Optional[str]
+    affected_component: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _share_base_url(request: Request) -> str:
+    # Prefer an explicitly configured public URL to avoid Host-header poisoning
+    # of generated share links; fall back to the request's own base URL.
+    if PUBLIC_BASE_URL:
+        return PUBLIC_BASE_URL.rstrip("/")
+    return str(request.base_url).rstrip("/")
+
 
 def _fire_notify(event: str, payload: dict) -> None:
     try:
@@ -270,6 +302,68 @@ def delete_scan(
         raise HTTPException(status_code=404, detail="Scan not found")
     db.delete(scan)
     db.commit()
+
+
+@app.post("/scans/{scan_id}/share", response_model=ShareResponse, status_code=201)
+def share_scan(
+    scan_id: int,
+    payload: ShareCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    scan = db.query(models.ScanResult).filter(
+        models.ScanResult.id == scan_id,
+        models.ScanResult.owner_id == current_user.id,
+    ).first()
+    if not scan:
+        # 404 (not 403) so a non-owner cannot probe which scan IDs exist.
+        raise HTTPException(status_code=404, detail="Scan not found")
+
+    share = models.SharedReport(
+        token=secrets.token_urlsafe(32),
+        scan_id=scan.id,
+        password_hash=get_password_hash(payload.password) if payload.password else None,
+        created_by=current_user.id,
+        expires_at=datetime.utcnow() + timedelta(hours=SHARE_LINK_TTL_HOURS),
+    )
+    db.add(share)
+    db.commit()
+
+    return {"share_url": f"{_share_base_url(request)}/share/{share.token}"}
+
+
+# ---------------------------------------------------------------------------
+# Shared report links (public)
+# ---------------------------------------------------------------------------
+
+@app.get("/share/{token}", response_model=SharedScanView)
+def view_shared_scan(
+    token: str,
+    password: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    share = db.query(models.SharedReport).filter(
+        models.SharedReport.token == token
+    ).first()
+
+    # Uniform 404 for unknown *or* expired tokens so the endpoint is not an
+    # oracle revealing which tokens exist.
+    if not share or share.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=404, detail="Share link not found or has expired")
+
+    if share.password_hash:
+        if not password or not verify_password(password, share.password_hash):
+            raise HTTPException(status_code=401, detail="Invalid or missing password")
+
+    scan = db.query(models.ScanResult).filter(
+        models.ScanResult.id == share.scan_id
+    ).first()
+    if not scan:
+        # Underlying scan was deleted after the link was created.
+        raise HTTPException(status_code=404, detail="Share link not found or has expired")
+
+    return scan
 
 
 # ---------------------------------------------------------------------------
