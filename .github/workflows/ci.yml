@@ -90,7 +90,45 @@ jobs:
       - name: Gate — fail on CRITICAL/HIGH in Python dependencies
         run: trivy fs --scanners vuln --severity CRITICAL,HIGH --exit-code 1 requirements.txt
 
-  # container-scan and iac-scan are added in Task 4, once the Dockerfile and
-  # terraform/ exist:
-  #   container-scan: docker build, then `trivy image` -> container.trivy.json
-  #   iac-scan:       `trivy config terraform/`         -> iac.trivy.json
+  container-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t vulntracker-api:ci .
+      - name: Install Trivy
+        run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.74.0
+      - name: Container image scan
+        run: trivy image --format json --output container.trivy.json vulntracker-api:ci
+      - name: Upload container report
+        uses: actions/upload-artifact@v4
+        with:
+          name: container.trivy.json
+          path: container.trivy.json
+      # No hard vuln gate: the critical/high OS CVEs are unfixable base-image
+      # packages the app never invokes (see docs/findings.md, F19). Gate instead
+      # on secrets/misconfigs baked into the image.
+      - name: Gate — no secrets or misconfigurations in the image
+        run: trivy image --scanners secret,misconfig --exit-code 1 --severity CRITICAL,HIGH vulntracker-api:ci
+
+  iac-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # Checkov (not Trivy) scans the Terraform: Trivy's Terraform scanner does
+      # not cover the kubernetes provider (verified), so it cannot see these
+      # resources. See docs/technical-notes.md.
+      - name: Install Checkov
+        run: pip install checkov
+      - name: IaC report
+        run: checkov -d terraform --compact -o json > iac.checkov.json || true
+      - name: Upload IaC report
+        uses: actions/upload-artifact@v4
+        with:
+          name: iac.checkov.json
+          path: iac.checkov.json
+      - name: Gate — fail on unjustified misconfigurations
+        run: checkov -d terraform --compact --quiet

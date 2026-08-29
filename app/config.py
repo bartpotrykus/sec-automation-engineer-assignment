@@ -1,8 +1,10 @@
 import os
 
-DATABASE_URL = "sqlite:///./vulntracker.db"
+# 12-factor: allow runtime injection (containers/K8s inject via env / secret store).
+# NOTE: the hardcoded fallbacks below are insecure and are removed in Task 3 (F1).
+DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./vulntracker.db")
 
-SECRET_KEY = "v3ry-s3cr3t-jwt-k3y-do-not-share"
+SECRET_KEY = os.environ.get("SECRET_KEY", "v3ry-s3cr3t-jwt-k3y-do-not-share")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 

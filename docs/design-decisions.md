@@ -7,9 +7,9 @@ walkthroughs live in [technical-notes.md](technical-notes.md).
 | Task | Status |
 | ---- | ------ |
 | 1 — Shared Report Link | ✅ Implemented |
-| 2 — Security analysis (scans + findings) | 🟡 SAST + SCA done; container + IaC in Task 4 |
+| 2 — Security analysis (scans + findings) | ✅ All four scans + findings.md |
 | 3 — Remediation | ⏳ Planned |
-| 4 — Containerisation & deployment | ⏳ Planned |
+| 4 — Containerisation & deployment | ✅ Dockerfile + Terraform |
 | 5 — Executive summary | ⏳ Planned |
 
 ---
@@ -148,6 +148,58 @@ result is corroboration: Semgrep independently flagged the SQLi, JWT `none`, cre
 notify SSRF; Trivy surfaced the vulnerable auth/crypto libraries that compound them.
 
 ### Potential improvements
-- Add container + IaC gates (Task 4).
 - SARIF upload to GitHub code scanning for inline PR annotations.
 - Pin exact Semgrep version in CI for full reproducibility.
+
+---
+
+## Task 4 — Containerisation & Deployment
+
+### Overview
+A production Dockerfile for the API and a Terraform (Kubernetes/AKS) deployment. Building these also
+unblocked the container and IaC scans in Task 2.
+
+### Dockerfile decisions
+
+**1. Multi-stage, digest-pinned slim base.**
+- *For:* the builder installs dependencies into a venv; the runtime copies only that venv + app code,
+  so no build toolchain ships in the final image. `python:3.11-slim` is pinned by digest
+  (`sha256:1042b6…`) for an immutable, reproducible base.
+- *Against:* digest pins need periodic bumps — automatable with Dependabot/Renovate.
+
+**2. Non-root + read-only-friendly layout.**
+- Runs as uid 10001; app code is copied root-owned (read-only to the runtime user). The prototype's
+  SQLite file is redirected to a dedicated `/data` volume so the container root filesystem can be
+  read-only under Kubernetes.
+- *Trade-off:* SQLite-on-a-volume is a prototype crutch; production points `DATABASE_URL` at a managed
+  database.
+
+**3. Stdlib HEALTHCHECK.** Probes `/health` with `urllib` rather than adding `curl` — one fewer package
+(and one fewer CVE surface) in the image.
+
+**4. No embedded secrets.** `SECRET_KEY`/`DATABASE_URL` are injected at runtime; the insecure config
+fallbacks remain only until Task 3 removes them (F1).
+
+### Terraform decisions
+
+**Kubernetes provider targeting AKS.**
+- *For:* directly expresses the required controls (security contexts, resource limits, network policy)
+  and fits the Azure-heavy role. Secrets come from **Azure Key Vault** via the Secrets Store CSI driver
+  with a workload identity — no secret values in the repo, manifests, or Terraform state.
+- *Against:* applying needs cluster add-ons (CSI driver + workload identity); documented in the README.
+- **Hardened by construction:** runAsNonRoot, readOnlyRootFilesystem, drop `ALL` capabilities, no
+  privilege escalation, seccomp `RuntimeDefault`, SA-token automount off, `ClusterIP` + `NetworkPolicy`
+  (ingress only from the ingress controller on 8000).
+
+### IaC scanner pivot — Trivy → Checkov
+- *Decision:* use **Checkov** for the IaC scan, even though Trivy handles SCA + container.
+- *Why:* Trivy's Terraform scanner does not cover the `kubernetes` provider — verified with a control
+  test (0 findings on a deliberately insecure pod). A clean Trivy result would have been meaningless.
+- *Effect:* a real IaC gate. After hardening: **0 failed / 3 justified skips**. The "consolidate on
+  Trivy" goal still holds everywhere Trivy is actually competent — this is using the right tool for one
+  domain, not tool sprawl.
+
+### Potential improvements
+- Distroless base to shed the unfixable OS CVEs (F19).
+- App reads secrets from the CSI file mount instead of env vars (clears CKV_K8S_35 / F20).
+- Automated base-image digest bumps.

@@ -6,11 +6,11 @@
 | --------- | ---- | ------ | ------ |
 | SAST | Semgrep (`p/python`, `p/javascript`, `p/nodejsscan`, `p/secrets`, `p/security-audit`) | `app/`, `notify/src/` | [reports/sast.semgrep.json](../reports/sast.semgrep.json) |
 | SCA / dependencies | Trivy `fs` (vuln) | `requirements.txt`, `notify/package-lock.json` | [reports/sca.trivy.json](../reports/sca.trivy.json) |
-| Container image | Trivy `image` | Docker image | ⏳ Task 4 → [reports/container.trivy.json](../reports/container.trivy.json) |
-| IaC | Trivy `config` | `terraform/` | ⏳ Task 4 → [reports/iac.trivy.json](../reports/iac.trivy.json) |
+| Container image | Trivy `image` | `vulntracker-api` image | [reports/container.trivy.json](../reports/container.trivy.json) |
+| IaC | **Checkov** | `terraform/` | [reports/iac.checkov.json](../reports/iac.checkov.json) |
 
-Container and IaC scans require artifacts produced in Task 4; this file is updated when they run.
-All four run in CI ([.github/workflows/ci.yml](../.github/workflows/ci.yml)).
+All four scans run in CI ([.github/workflows/ci.yml](../.github/workflows/ci.yml)). **Checkov, not Trivy,
+scans the IaC** — see the rationale below; the choice is a deliberate, verified one.
 
 **Why severity is contextual here.** VulnTracker is an inventory of an organisation's *known,
 unremediated* vulnerabilities and who owns them. That makes it unusually high-value: a
@@ -43,6 +43,8 @@ tool (F7 up-contextualised, F12 down-graded after verification).
 | F16 | Other hardcoded secrets: DB creds, `ADMIN_API_KEY`, notify `SERVICE_KEY` | [config.py:8-14](../app/config.py#L8-L14), [config.js:6](../notify/src/config.js#L6) | Manual | **Medium** | Starter |
 | F17 | notify leaks `err.stack` to clients; `GET /webhooks` lists all endpoints | [index.js:36-48](../notify/src/index.js#L36-L48), [77-80](../notify/src/index.js#L77-L80) | Manual | **Low** | Starter (notify) |
 | F18 | `pytest` 7.4.3 CVE-2025-71176 — test-only, not shipped | [requirements.txt:10](../requirements.txt#L10) | Trivy | **Low** | Starter |
+| F19 | Base-image OS CVEs (perl/ncurses/gzip) — mostly unfixable & unused | [Dockerfile](../Dockerfile) | Trivy image | **Low** | New (Task 4) |
+| F20 | K8s secrets injected as env vars, not files (accepted) | [terraform/main.tf](../terraform/main.tf) | Checkov | **Low** | New (Task 4) |
 
 **SCA totals (Trivy, unique CVEs):** `requirements.txt` — 1 critical / 11 high / 9 medium / 7 low.
 `notify/package-lock.json` — 15 high / 15 medium / 7 low.
@@ -113,6 +115,30 @@ dependencies and the fix is a version bump.
 - **Dependency noise vs. signal.** Trivy reports 65 unique CVEs across both ecosystems; most collapse
   into a handful of package upgrades (axios, cryptography, python-multipart, python-jose). The
   remediation plan tracks these as package-level actions rather than per-CVE.
+
+## Container image (F19) and IaC (F20)
+
+**Container (Trivy image).** The image scan reports 4 critical / 28 high CVEs, but nearly all
+critical/high OS packages are `perl-base`, `ncurses`, `gzip` and the like — pulled in by the Debian
+base, never invoked by the FastAPI app, and many with *no fix available* upstream (`fixed: -`). The
+actionable subset is the Python dependencies, already tracked as F7/F8/F13. No secrets or
+misconfigurations were baked into the image. Net: **Low** actionable risk; the mitigation is a slimmer
+base (e.g. distroless) or accepting unfixable base CVEs — tracked in the remediation plan, not gated in
+CI (gating on unfixable OS CVEs would be permanently red).
+
+**IaC — why Checkov, not Trivy.** Trivy is the scanner for SCA and the container image, but it is the
+*wrong* tool for this IaC: Trivy's Terraform scanner does not cover the `kubernetes` provider. I
+verified this with a control test — Trivy reported **0** misconfigurations on a deliberately insecure
+`kubernetes_pod` (privileged, host network, root). A 0-finding Trivy result would have meant "no
+applicable rules", not "secure". Checkov *does* evaluate these resources. After hardening the result is
+**0 failed / 3 justified skips**:
+- `CKV_K8S_15` (image pull policy) — **fixed** (`Always`).
+- `CKV_K8S_14` / `CKV_K8S_43` (image tag/digest) — **enforced** by a `var.image` validation requiring
+  `@sha256:`; skipped because Checkov cannot resolve the variable's runtime value.
+- `CKV_K8S_35` (F20 — secrets as env vars, not files) — **accepted**: secrets come from Azure Key Vault
+  via the CSI driver (never hardcoded); env injection is used for app compatibility, with file-based
+  consumption noted as future hardening.
+- `CKV_SECRET_6` — **false positive** on the `secretProviderClass` resource *name*; suppressed inline.
 
 ## New-feature (Task 1) assessment
 

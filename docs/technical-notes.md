@@ -104,8 +104,8 @@ curl -s 'localhost:8000/share/xoq...?password=s3cret'
 | SAST | Semgrep (Docker) | `semgrep --config p/python --config p/javascript --config p/nodejsscan --config p/secrets --config p/security-audit --json -o reports/sast.semgrep.json app notify/src` | [sast.semgrep.json](../reports/sast.semgrep.json) |
 | SCA | Trivy 0.74.0 | `trivy fs --scanners vuln --format json -o reports/sca.trivy.json --skip-dirs .venv --skip-dirs notify/node_modules .` | [sca.trivy.json](../reports/sca.trivy.json) |
 | Secrets (supporting) | Trivy `--scanners secret` | run ad-hoc; **0 hits** (see note) | not retained |
-| Container | Trivy `image` | ⏳ Task 4 | container.trivy.json |
-| IaC | Trivy `config` | ⏳ Task 4 | iac.trivy.json |
+| Container | Trivy `image` | `trivy image --format json -o reports/container.trivy.json vulntracker-api:local` | [container.trivy.json](../reports/container.trivy.json) |
+| IaC | **Checkov** | `checkov -d terraform --compact -o json > reports/iac.checkov.json` | [iac.checkov.json](../reports/iac.checkov.json) |
 
 Semgrep runs via the `semgrep/semgrep` Docker image because it has no native Windows build; it scanned
 9 git-tracked source files with 431 rules.
@@ -139,3 +139,50 @@ finding. See F5/F9/F14/F17 in findings.md for the notify items that are tracked 
   `jwt.decode`), so F12 is a *latent* medium, not a critical — see the auth.py analysis in Task 3.
 - **CVE severity ≠ finding severity:** F7 (`python-jose`) was contextualised down from Trivy's critical
   because the app uses symmetric HS256, not the asymmetric keys the CVE targets.
+
+---
+
+## Task 4 — Containerisation & Deployment
+
+### Dockerfile ([Dockerfile](../Dockerfile))
+Multi-stage build:
+1. **builder** — `python:3.11-slim` pinned by digest (`sha256:1042b6…`); creates a venv and
+   `pip install`s `requirements.txt` (own layer, cache-friendly).
+2. **runtime** — same digest-pinned base; creates user/group `appuser` (uid/gid 10001); copies the
+   venv and `app/`; sets `DATABASE_URL=sqlite:////data/vulntracker.db` on a writable `/data` volume so
+   the app code stays read-only; `HEALTHCHECK` uses `urllib` (no `curl`); `USER appuser`; `CMD uvicorn`.
+
+**Verified locally:** image builds; `docker run -p 8000:8000` → `GET /health` = 200;
+`docker exec … id` = `uid=10001(appuser)`; `docker inspect … Health.Status` = `healthy`.
+
+### Container scan ([container.trivy.json](../reports/container.trivy.json))
+`trivy image` on the built image: OS (debian) 3 critical / 11 high — almost entirely `perl-base`,
+`ncurses`, `gzip` (unused, many with no fix); Python layer mirrors the SCA findings (F7/F8/F13);
+**0 secrets, 0 misconfigurations**. Interpretation in findings.md (F19).
+
+### Terraform ([terraform/](../terraform/))
+| Resource | Security properties |
+| -------- | ------------------- |
+| `kubernetes_deployment_v1` | pod + container securityContext (runAsNonRoot uid 10001, readOnlyRootFilesystem, drop ALL caps, no privilege escalation, seccomp RuntimeDefault); CPU/mem requests+limits; liveness/readiness on `/health`; SA-token automount off; env from CSI-synced Secret; `emptyDir` for `/data` + `/tmp` |
+| `SecretProviderClass` (CSI) | pulls `SECRET-KEY` / `DATABASE-URL` from Azure Key Vault via workload identity; syncs to a K8s Secret — no secret values in repo/manifests/state |
+| `kubernetes_service_v1` | `ClusterIP` (no direct external exposure) |
+| `kubernetes_network_policy_v1` | ingress only from the ingress-controller namespace on 8000; egress limited to DNS + 443 |
+| `kubernetes_service_account_v1` | workload-identity annotated; automount disabled |
+
+### IaC scan — Trivy vs Checkov ([iac.checkov.json](../reports/iac.checkov.json))
+**Control test:** `trivy config` on a deliberately insecure `kubernetes_pod` (privileged, hostNetwork,
+hostPID, root) → **0 misconfigurations**. This proves Trivy's Terraform scanner does not cover the
+`kubernetes` provider, so it was replaced by **Checkov** for IaC only.
+
+Checkov result after hardening: **28 passed, 0 failed, 3 skipped** (+1 secrets false-positive skipped):
+| Check | Disposition |
+| ----- | ----------- |
+| CKV_K8S_15 (imagePullPolicy) | **fixed** → `Always` |
+| CKV_K8S_14 / CKV_K8S_43 (tag/digest) | **enforced** via `var.image` `@sha256:` validation; skipped (Checkov can't resolve the variable) |
+| CKV_K8S_35 (secrets as env) | **accepted** — Key Vault CSI sourced, env for app compat; file-based consumption is future work |
+| CKV_SECRET_6 | **false positive** on `secretProviderClass` name; inline-suppressed |
+
+### CI ([ci.yml](../.github/workflows/ci.yml))
+Added `container-scan` (docker build → `trivy image` → upload → gate on secrets/misconfig only, since
+OS CVEs are unfixable) and `iac-scan` (`checkov -d terraform` → upload → gate on any unjustified
+misconfiguration). Both gates are green today.

@@ -77,6 +77,37 @@ npm test
 
 ---
 
+## Running with Docker (Python API)
+
+A production-grade image for the API is defined in [`Dockerfile`](Dockerfile) — multi-stage,
+digest-pinned `python:3.11-slim`, non-root, with a `HEALTHCHECK` and no baked-in secrets.
+
+```bash
+# Build
+docker build -t vulntracker-api:local .
+
+# Run — inject a real secret at runtime; never bake it into the image
+docker run --rm -p 8000:8000 \
+  -e SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')" \
+  vulntracker-api:local
+
+# Verify
+curl localhost:8000/health          # {"status":"ok","service":"vulntracker-api"}
+```
+
+- Runs as non-root **uid 10001**; the app code is read-only.
+- The prototype SQLite DB is written to the `/data` volume — mount one to persist
+  (`-v vt-data:/data`). Point `DATABASE_URL` at a managed database for production.
+- Health status: `docker inspect --format '{{.State.Health.Status}}' <container>`.
+
+## Kubernetes deployment
+
+[`terraform/`](terraform/) deploys the API to Kubernetes / AKS with secrets sourced from
+Azure Key Vault (Secrets Store CSI driver), restricted ingress (NetworkPolicy + `ClusterIP`),
+resource limits, and hardened security contexts. See [terraform/README.md](terraform/README.md).
+
+---
+
 ## Your Tasks
 
 ### Task 1 — Extend the App _(~1–1.5 hrs)_

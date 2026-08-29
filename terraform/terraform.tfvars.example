@@ -1,0 +1,13 @@
+# Copy to terraform.tfvars and fill in for your environment.
+# NOTE: no secret VALUES belong here — only references. SECRET_KEY and
+# DATABASE_URL live in Azure Key Vault and are pulled by the CSI driver.
+
+image                       = "myregistry.azurecr.io/vulntracker-api@sha256:<digest>"
+namespace                   = "vulntracker"
+replicas                    = 2
+
+key_vault_name              = "kv-vulntracker-prod"
+azure_tenant_id             = "00000000-0000-0000-0000-000000000000"
+workload_identity_client_id = "11111111-1111-1111-1111-111111111111"
+
+ingress_namespace           = "ingress-nginx"

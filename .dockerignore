@@ -1,0 +1,25 @@
+# Keep the build context small and free of secrets / local state
+.git
+.gitignore
+.github
+.venv
+venv
+env
+**/__pycache__
+*.pyc
+*.pyo
+*.db
+*.sqlite3
+.pytest_cache
+.coverage
+htmlcov
+
+# Not part of the Python API image
+notify
+terraform
+reports
+docs
+tests
+*.md
+.vscode
+.claude
