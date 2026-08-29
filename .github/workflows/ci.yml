@@ -43,23 +43,54 @@ jobs:
         run: npm test
         working-directory: notify
 
-  # TODO (candidates): Add the following security scanning jobs.
-  # Tool selection is your decision — document your choices in findings.md.
-  #
-  # sast:
-  #   Static Application Security Testing against app/ source code
-  #   Upload JSON report as a build artifact named sast.<tool>.json
-  #   Build should fail on critical findings
-  #
-  # sca:
-  #   Dependency / Software Composition Analysis against requirements.txt
-  #   Upload JSON report as a build artifact named sca.<tool>.json
-  #   Build should fail on critical or high severity CVEs
-  #
-  # container-scan:
-  #   Build the Docker image, then scan it for vulnerabilities and misconfigurations
-  #   Upload JSON report as a build artifact named container.<tool>.json
-  #
-  # iac-scan:
-  #   Scan the Helm chart or Terraform configuration for security misconfigurations
-  #   Upload JSON report as a build artifact named iac.<tool>.json
+  # --- Security scanning -----------------------------------------------------
+  # Tool choices are documented in docs/findings.md. Each job produces a raw
+  # JSON report (uploaded as an artifact) AND enforces a gate. Gates are scoped
+  # to code we own (app/, requirements.txt); notify's out-of-scope issues are
+  # tracked in findings.md, not blocked here (see docs/technical-notes.md).
+
+  sast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Semgrep
+        run: pip install semgrep
+      - name: SAST report (app + notify)
+        run: |
+          semgrep --config p/python --config p/javascript --config p/nodejsscan \
+            --config p/secrets --config p/security-audit \
+            --json --output sast.semgrep.json --metrics=off app notify/src
+      - name: Upload SAST report
+        uses: actions/upload-artifact@v4
+        with:
+          name: sast.semgrep.json
+          path: sast.semgrep.json
+      - name: Gate — fail on blocking (ERROR) findings in app/
+        run: |
+          count=$(jq '[.results[] | select(.extra.severity=="ERROR") | select(.path|startswith("app/"))] | length' sast.semgrep.json)
+          echo "Blocking SAST findings in app/: $count"
+          test "$count" -eq 0
+
+  sca:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Trivy
+        run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.74.0
+      - name: SCA report (all dependencies)
+        run: trivy fs --scanners vuln --format json --output sca.trivy.json --skip-dirs .venv --skip-dirs notify/node_modules .
+      - name: Upload SCA report
+        uses: actions/upload-artifact@v4
+        with:
+          name: sca.trivy.json
+          path: sca.trivy.json
+      - name: Gate — fail on CRITICAL/HIGH in Python dependencies
+        run: trivy fs --scanners vuln --severity CRITICAL,HIGH --exit-code 1 requirements.txt
+
+  # container-scan and iac-scan are added in Task 4, once the Dockerfile and
+  # terraform/ exist:
+  #   container-scan: docker build, then `trivy image` -> container.trivy.json
+  #   iac-scan:       `trivy config terraform/`         -> iac.trivy.json

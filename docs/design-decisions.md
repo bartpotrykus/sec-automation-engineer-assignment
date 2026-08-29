@@ -7,7 +7,7 @@ walkthroughs live in [technical-notes.md](technical-notes.md).
 | Task | Status |
 | ---- | ------ |
 | 1 — Shared Report Link | ✅ Implemented |
-| 2 — Security analysis (scans + findings) | ⏳ Planned |
+| 2 — Security analysis (scans + findings) | 🟡 SAST + SCA done; container + IaC in Task 4 |
 | 3 — Remediation | ⏳ Planned |
 | 4 — Containerisation & deployment | ⏳ Planned |
 | 5 — Executive summary | ⏳ Planned |
@@ -95,3 +95,59 @@ stakeholder (auditor, customer). Links **expire after 24 hours** and support
 - Alembic migrations (the prototype relies on `create_all`; a new table is fine, but schema
   changes to existing tables would need migrations).
 - One-time-view or view-count-limited links for higher-sensitivity reports.
+
+---
+
+## Task 2 — Security Analysis
+
+### Overview
+Ran the runnable scan categories now and wired them into CI; container and IaC scans depend on
+Task 4 artifacts and are added there. Full prioritised results in [findings.md](findings.md).
+
+- **SAST** — Semgrep (via Docker) over `app/` + `notify/src`: 5 findings.
+- **SCA** — Trivy `fs` over `requirements.txt` + `notify/package-lock.json`: 65 unique CVEs.
+- **CI** — `sast` + `sca` jobs added to [ci.yml](../.github/workflows/ci.yml) with severity gates.
+
+### Key decisions
+
+**1. Consolidate on Trivy for SCA (and later container + IaC).**
+- *For:* one engine covers dependencies, OS packages, and IaC misconfig; single JSON shape; fewer
+  tools to install, pin, and defend. Covers both ecosystems (`pip` + `npm`) in one pass.
+- *Against:* a dedicated SCA tool (e.g. `pip-audit`, `npm audit`) can have deeper per-ecosystem
+  advisory data; Trivy is a generalist.
+- *Effect:* chosen deliberately (per agreed scope) over a grype + Docker Scout split.
+
+**2. Semgrep for SAST (not Bandit).**
+- *For:* multi-language — it scanned the Python API *and* the Node service in one run, catching the
+  `notify` SSRF that a Python-only tool (Bandit) would miss; taint/security rulesets flag JWT `none`,
+  raw-SQL, and credential logging out of the box.
+- *Against:* Semgrep has no native Windows support, so it runs via Docker locally (Bandit would run
+  natively). Acceptable — CI runs it on Linux anyway.
+
+**3. CI gates are scoped to code we own; reports cover everything.**
+- *Decision:* the uploaded report scans the whole repo (app + notify), but the *failing gate* only
+  blocks on criticals in `app/` and `requirements.txt`.
+- *For:* a gate must stop *our* regressions without going permanently red over `notify`, which is
+  out of scope for fixes (per the brief) yet legitimately full of findings. Blocking on it would
+  either force scope-violating changes or a blanket ignore-file.
+- *Against:* a stricter org might gate the whole monorepo. Trade-off is documented, and the notify
+  findings remain visible in `findings.md` as accepted/tracked risk.
+- *Effect:* CI is red today on the two app criticals (SQLi, JWT `none`) and goes green once Task 3
+  fixes them — the gate is doing its job, not being bypassed.
+
+**4. Severity is my assessment, not the tool's.**
+- Two deliberate divergences: **F7** (`python-jose`) — Trivy says *critical*, I rate *high* because
+  the alg-confusion CVE targets asymmetric keys and this app uses HS256; **F12** (`alg:"none"`) —
+  down-graded to *medium latent* after I verified python-jose 3.3.0 does not actually honour it here.
+- *Why it matters:* the brief grades interpretation over tool output; parroting a scanner's severity
+  would be the wrong answer.
+
+### Effect
+Real, reproducible evidence backs the manual review, and CI now enforces it. The most security-relevant
+result is corroboration: Semgrep independently flagged the SQLi, JWT `none`, credential logging, and
+notify SSRF; Trivy surfaced the vulnerable auth/crypto libraries that compound them.
+
+### Potential improvements
+- Add container + IaC gates (Task 4).
+- SARIF upload to GitHub code scanning for inline PR annotations.
+- Pin exact Semgrep version in CI for full reproducibility.

@@ -93,3 +93,49 @@ curl -s -X POST localhost:8000/scans/1/share -H "authorization: Bearer $TOKEN" \
 # 3. View it (public)
 curl -s 'localhost:8000/share/xoq...?password=s3cret'
 ```
+
+---
+
+## Task 2 — Security Analysis
+
+### Tools and exact commands
+| Category | Tool | Command (as run) | Report |
+| -------- | ---- | ---------------- | ------ |
+| SAST | Semgrep (Docker) | `semgrep --config p/python --config p/javascript --config p/nodejsscan --config p/secrets --config p/security-audit --json -o reports/sast.semgrep.json app notify/src` | [sast.semgrep.json](../reports/sast.semgrep.json) |
+| SCA | Trivy 0.74.0 | `trivy fs --scanners vuln --format json -o reports/sca.trivy.json --skip-dirs .venv --skip-dirs notify/node_modules .` | [sca.trivy.json](../reports/sca.trivy.json) |
+| Secrets (supporting) | Trivy `--scanners secret` | run ad-hoc; **0 hits** (see note) | not retained |
+| Container | Trivy `image` | ⏳ Task 4 | container.trivy.json |
+| IaC | Trivy `config` | ⏳ Task 4 | iac.trivy.json |
+
+Semgrep runs via the `semgrep/semgrep` Docker image because it has no native Windows build; it scanned
+9 git-tracked source files with 431 rules.
+
+### What the tools caught
+- **Semgrep (5):** `jwt-python-none-alg` (auth.py:38), `avoid-sqlalchemy-text` (database.py:28),
+  `python-logger-credential-disclosure` ×2 (login), `node_ssrf` (dispatcher.js:7).
+- **Trivy SCA (65 unique CVEs):** `requirements.txt` = 1 critical / 11 high / 9 medium / 7 low;
+  `notify/package-lock.json` = 15 high / 15 medium / 7 low. Key packages: `python-jose`, `cryptography`,
+  `python-multipart` (Python); `axios`, `express`, `path-to-regexp`, `body-parser` (npm).
+
+### CI wiring ([ci.yml](../.github/workflows/ci.yml))
+Two new jobs, each = **report artifact + gate**:
+- `sast`: install Semgrep → produce `sast.semgrep.json` (uploaded) → gate fails if any `ERROR`-severity
+  finding has a path under `app/`. Verified locally: 2 such findings today (auth.py:38, database.py:28),
+  both fixed in Task 3 → gate turns green. The notify `node_ssrf` ERROR is intentionally excluded from
+  the gate (out-of-scope service) but present in the report.
+- `sca`: install Trivy 0.74.0 → produce `sca.trivy.json` (uploaded, whole repo) → gate runs
+  `trivy fs --severity CRITICAL,HIGH --exit-code 1 requirements.txt`, so only the app's Python deps
+  block the build (cleared by dependency bumps in Task 3). notify's npm CVEs are reported, not gated.
+
+**Gate-scoping rationale:** a security gate should block *our* regressions, not sit permanently red on
+a service the brief tells us not to change. Scoping the failing check to `app/` + `requirements.txt`
+keeps the gate meaningful and green-able, while the full-repo report preserves visibility of every
+finding. See F5/F9/F14/F17 in findings.md for the notify items that are tracked but not gated.
+
+### Interpretation notes
+- **Secret scanners found nothing.** Trivy's secret scanner and Semgrep's `p/secrets` pack both
+  returned 0 on the four hardcoded secrets — they don't match known vendor formats. F1/F16 are manual.
+- **`alg:"none"` verified non-exploitable** in python-jose 3.3.0 (a key is always passed to
+  `jwt.decode`), so F12 is a *latent* medium, not a critical — see the auth.py analysis in Task 3.
+- **CVE severity ≠ finding severity:** F7 (`python-jose`) was contextualised down from Trivy's critical
+  because the app uses symmetric HS256, not the asymmetric keys the CVE targets.
