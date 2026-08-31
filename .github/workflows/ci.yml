@@ -57,7 +57,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install Semgrep
-        run: pip install semgrep
+        run: pip install semgrep==1.174.0
       - name: SAST report (app + notify)
         run: |
           semgrep --config p/python --config p/javascript --config p/nodejsscan \
@@ -122,7 +122,7 @@ jobs:
       # not cover the kubernetes provider (verified), so it cannot see these
       # resources. See docs/technical-notes.md.
       - name: Install Checkov
-        run: pip install checkov
+        run: pip install checkov==3.3.15
       - name: IaC report
         run: checkov -d terraform --compact -o json > iac.checkov.json || true
       - name: Upload IaC report

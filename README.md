@@ -1,5 +1,23 @@
 # Security Automation Engineer — Take-Home Assignment
 
+## Solution Overview
+
+**My completed submission for this take-home.** What was done, and where it is documented.
+
+| Task | Summary |
+| ---- | ------- |
+| 1 — Feature | **Shared Report Link** (`POST /scans/{id}/share`, `GET /share/{token}`): opaque 256-bit tokens, ownership-checked, optional bcrypt password, 24h expiry, curated public view. |
+| 2 — Analysis | **SAST** (Semgrep), **SCA + container** (Trivy), **IaC** (Checkov) — raw reports in [`reports/`](reports/), interpreted in [`docs/findings.md`](docs/findings.md); all wired into CI with severity gates. |
+| 3 — Remediation | **13 findings fixed** (2 critical, 6 high), one in the Task 1 feature; deferrals in [`docs/remediation-plan.md`](docs/remediation-plan.md). |
+| 4 — Deployment | Production [`Dockerfile`](Dockerfile) (multi-stage, non-root, pinned, healthcheck) + [`terraform/`](terraform/) (AKS, Key Vault CSI secrets, NetworkPolicy, security contexts). |
+| 5 — Summary | [`docs/executive-summary.md`](docs/executive-summary.md) — 5-minute CISO briefing. |
+
+**Docs:** [findings](docs/findings.md) · [remediation plan](docs/remediation-plan.md) · [executive summary](docs/executive-summary.md) · [design decisions](docs/design-decisions.md) · [technical notes](docs/technical-notes.md)
+
+Docker build/run and Kubernetes instructions are further down. The original assignment brief follows.
+
+---
+
 Welcome. This assignment is designed to reflect the real work of a Lead Security Automation Engineer: extending an existing service, identifying and assessing security risks, remediating them with code, and deploying it securely. There are no trick questions — we are evaluating your depth of knowledge, your judgment under constraints, and your ability to communicate risk.
 
 **Estimated time: 4–6 hours.** We respect your time. If you find yourself going significantly over, scope down rather than rushing.
